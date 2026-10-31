@@ -67,6 +67,8 @@ export async function upsertBcpDraft(
     }
 
     let savedAny = false
+    let companiesUpdated = false
+    let maxCompletedStep = 0
 
     // step1: 会社基本情報を companies テーブルに upsert 保存
     // （未入力の場合は上書きせず既存の会社名を保護する）
@@ -88,25 +90,44 @@ export async function upsertBcpDraft(
         return { success: false, error: companyError.message }
       }
       savedAny = true
+      companiesUpdated = true
+      maxCompletedStep = Math.max(maxCompletedStep, 1)
     }
+
+    // 既存の step_status を読み取り、退行させないよう最大値を採用する
+    const { data: existingBcp } = await supabase
+      .from("bcp_inputs")
+      .select("step_status")
+      .eq("company_id", companyId)
+      .maybeSingle()
+
+    const currentStepStatus = existingBcp?.step_status ?? 0
 
     // step2〜6: 検証を通った列のみ bcp_inputs に upsert 保存
     const bcpUpdate: Record<string, unknown> = { company_id: companyId }
     if (validateStep2(data.step2).success) {
       bcpUpdate.policy = data.step2
+      maxCompletedStep = Math.max(maxCompletedStep, 2)
     }
     if (validateStep3(data.step3).success) {
       bcpUpdate.risk_assessment = data.step3
+      maxCompletedStep = Math.max(maxCompletedStep, 3)
     }
     if (validateStep4(data.step4).success) {
       bcpUpdate.core_business = data.step4
+      maxCompletedStep = Math.max(maxCompletedStep, 4)
     }
     if (validateStep5(data.step5).success) {
       bcpUpdate.emergency_contacts = data.step5
+      maxCompletedStep = Math.max(maxCompletedStep, 5)
     }
     if (validateStep6(data.step6).success) {
       bcpUpdate.measures_and_finance = data.step6
+      maxCompletedStep = Math.max(maxCompletedStep, 6)
     }
+
+    // step_status は既存値と今回の最大ステップの大きい方を採用し、進捗が退行しないよう保護する
+    bcpUpdate.step_status = Math.max(currentStepStatus, maxCompletedStep)
 
     if (Object.keys(bcpUpdate).length > 1) {
       const { error } = await supabase
@@ -117,6 +138,16 @@ export async function upsertBcpDraft(
         return { success: false, error: error.message }
       }
       savedAny = true
+    }
+
+    // step1 以外のみ更新された場合、companies.updated_at も更新する。
+    // cron 年次更新リマインドは companies.updated_at を最終更新の基準にするため、
+    // bcp_inputs のみ更新されると判定がズレる。triggger handle_updated_at で now() が設定される。
+    if (savedAny && !companiesUpdated) {
+      await supabase
+        .from("companies")
+        .update({ updated_at: new Date().toISOString() })
+        .eq("id", companyId)
     }
 
     if (!savedAny) {

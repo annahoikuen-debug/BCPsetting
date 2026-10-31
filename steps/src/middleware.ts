@@ -8,11 +8,19 @@ import { NextResponse, type NextRequest } from "next/server"
  * - /wizard, /dashboard 以下は未認証時 /login へリダイレクト
  * - /login, /signup は認証済み時 /wizard へリダイレクト
  *
- * サーバー用クライアントは src/lib/supabase/server.ts の createClient を
- * 再利用することも可能だが、middleware では response クッキーの書き込みが
- * 必要なため、ここで直接 createServerClient を構築する。
+ * src/proxy.ts と同じロジックを Next.js ミドルウェアとして配置し、
+ * エッジで認証ルート保護を強制する。
  */
-export async function proxy(request: NextRequest) {
+
+/** セキュリティヘッダーをレスポンスに付与する */
+function withSecurityHeaders(response: NextResponse): NextResponse {
+  response.headers.set("X-Frame-Options", "DENY")
+  response.headers.set("X-Content-Type-Options", "nosniff")
+  response.headers.set("Referrer-Policy", "strict-origin-when-cross-origin")
+  return response
+}
+
+export async function middleware(request: NextRequest) {
   const response = NextResponse.next({
     request: { headers: request.headers },
   })
@@ -22,7 +30,7 @@ export async function proxy(request: NextRequest) {
   // 環境変数が未設定の場合（例: .env.local 未作成）は認証チェックをスキップ。
   // 本番運用時は NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY を必ず設定すること。
   if (!process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) {
-    return response
+    return withSecurityHeaders(response)
   }
 
   const supabase = createServerClient(
@@ -57,22 +65,17 @@ export async function proxy(request: NextRequest) {
   if (!user && isProtectedRoute) {
     const loginUrl = new URL("/login", request.url)
     loginUrl.searchParams.set("next", request.nextUrl.pathname)
-    return NextResponse.redirect(loginUrl)
+    return withSecurityHeaders(NextResponse.redirect(loginUrl))
   }
 
   // 認証済みユーザーが認証画面にアクセス → /wizard へ
   if (user && isAuthRoute) {
-    return NextResponse.redirect(new URL("/wizard", request.url))
+    return withSecurityHeaders(NextResponse.redirect(new URL("/wizard", request.url)))
   }
 
   // トークンリフレッシュで更新されたクッキーを response に書き戻し、
-  // ブラウザに届ける（createServerClient の setAll で response.cookies に
-  // 書き込まれた Set-Cookie はこの response オブジェクトから送られる）。
-  // WHY: new NextResponse.next() で別オブジェクトを返すと、
-  // response.cookies に書き込まれたクッキーが破棄され、トークン更新が
-  // ブラウザに届かなくなるため、クッキー書き込み済みの response を
-  // そのまま返す。
-  return response
+  // ブラウザに届ける。
+  return withSecurityHeaders(response)
 }
 
 export const config = {

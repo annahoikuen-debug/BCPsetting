@@ -64,7 +64,7 @@ export async function POST(req: Request) {
   let event: Stripe.Event
   try {
     // 署名を厳密に検証し、改ざん・リプレイ攻撃を防ぐ
-    event = getStripe().webhooks.constructEvent(body, signature, webhookSecret)
+    event = await getStripe().webhooks.constructEvent(body, signature, webhookSecret)
   } catch (err) {
     return NextResponse.json(
       { error: `Webhook 署名検証に失敗しました: ${err instanceof Error ? err.message : String(err)}` },
@@ -72,10 +72,23 @@ export async function POST(req: Request) {
     )
   }
 
+  // サービスロールクライアントを使用（Webhook は認証セッションを持たず、
+  // RLS をバイパスして companies / orders を更新する必要があるため）
+  const supabase = createAdminClient()
+
+  // イベント ID の重複チェック（リプレイ攻撃・重複送信対策）
+  // 同一 event.id が既に処理済みなら即座に 200 OK を返し、Stripe への再送を防ぐ
+  const { data: existingEvent } = await supabase
+    .from("stripe_webhook_events")
+    .select("id")
+    .eq("event_id", event.id)
+    .single()
+
+  if (existingEvent) {
+    return NextResponse.json({ received: true, duplicate: true }, { status: 200 })
+  }
+
   try {
-    // サービスロールクライアントを使用（Webhook は認証セッションを持たず、
-    // RLS をバイパスして companies / orders を更新する必要があるため）
-    const supabase = createAdminClient()
 
     switch (event.type) {
       case "checkout.session.completed": {
@@ -236,12 +249,17 @@ export async function POST(req: Request) {
         break
     }
 
+    // 処理済みイベントを記録し、重複処理・リプレイ攻撃を防止する
+    await supabase.from("stripe_webhook_events").insert({
+      event_id: event.id,
+      event_type: event.type,
+    })
+
     return NextResponse.json({ received: true }, { status: 200 })
   } catch (err) {
+    console.error("[POST /api/webhooks/stripe] エラー:", err)
     return NextResponse.json(
-      {
-        error: err instanceof Error ? err.message : "Webhook 処理に失敗しました",
-      },
+      { error: "Webhook 処理に失敗しました" },
       { status: 500 },
     )
   }

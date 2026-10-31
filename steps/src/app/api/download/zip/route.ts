@@ -119,7 +119,10 @@ export async function GET(req: Request) {
       },
     })
 
-    // 各ドキュメントをストレージからダウンロードして ZIP に追加
+    // 各ドキュメントをストレージからダウンロードして ZIP に追加。
+    // ダウンロード失敗は黙ってスキップせず、失敗数を集計する。
+    // 全件失敗した場合は空の ZIP を 200 で返さずエラーを返す（信頼性の担保）。
+    const failedDocs: string[] = []
     for (const doc of documents) {
       const fileName = `${doc.doc_type}_v${doc.version}.pdf`
       const filePath = `${companyId}/${fileName}`
@@ -129,6 +132,7 @@ export async function GET(req: Request) {
         .download(filePath)
 
       if (downloadError || !fileData) {
+        failedDocs.push(`${doc.doc_type}_v${doc.version}`)
         continue
       }
 
@@ -138,15 +142,25 @@ export async function GET(req: Request) {
 
     archive.finalize()
 
+    // 全ドキュメントのダウンロードに失敗した場合は空ZIPを返さずエラーとする
+    if (failedDocs.length === documents.length) {
+      return NextResponse.json(
+        {
+          error: "ドキュメントファイルの取得にすべて失敗しました",
+          failed: failedDocs,
+        },
+        { status: 500 },
+      )
+    }
+
     return new NextResponse(stream, {
       status: 200,
       headers: Object.fromEntries(headers),
     })
   } catch (err) {
+    console.error("[GET /api/download/zip] エラー:", err)
     return NextResponse.json(
-      {
-        error: err instanceof Error ? err.message : "ZIP 生成に失敗しました",
-      },
+      { error: "ZIP 生成に失敗しました" },
       { status: 500 },
     )
   }

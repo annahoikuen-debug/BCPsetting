@@ -346,7 +346,7 @@ function getDocTypeLabel(docType: string): string {
  * 決済処理を実行し、PDF 生成・ストレージ保存・DB登録を行う。
  * JSX を含まない純粋なデータ処理関数。
  */
-async function processPayment(
+export async function processPayment(
   sessionId: string,
 ): Promise<{
   success: boolean
@@ -438,13 +438,13 @@ async function processPayment(
 
     // orders レコードを作成（Webhook 側との重複は unique 制約でスキップ）
     // WHY: 23505 (unique_violation) は重複 webhook / 重複アクセスによるもので、
-    // 正常な冪等動作として扱う。
+    // 正常な冪等動作として扱う。金額は Stripe セッションの実際の amount_total を記録する。
     const { error: orderError } = await supabase.from("orders").insert({
       company_id: companyId,
       stripe_session_id: sessionId,
       plan_type: "one_time",
       status: "paid",
-      amount: 0, // 金額は Stripe セッションから取得するか、固定値
+      amount: payment.session.amount_total ?? 0,
     })
 
     if (orderError && orderError.code !== "23505") {

@@ -14,9 +14,17 @@
 import { NextResponse } from "next/server"
 import { createClient } from "@/lib/supabase/server"
 import { getStripe } from "@/lib/stripe"
+import { checkRateLimit } from "@/lib/rate-limit"
 
 export async function POST(req: Request) {
   try {
+    // 同一オリジンチェック（CSRF 対策）
+    const requestOrigin = req.headers.get("origin")
+    const allowedOrigin = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000"
+    if (requestOrigin && requestOrigin !== allowedOrigin) {
+      return NextResponse.json({ error: "不正なリクエストです" }, { status: 403 })
+    }
+
     const supabase = await createClient()
 
     // 認証状態の確認
@@ -47,6 +55,15 @@ export async function POST(req: Request) {
 
     const companyId = profile.company_id
 
+    // レート制限チェック（ユーザーID単位、1分5リクエスト）
+    const portalRateLimit = checkRateLimit(user.id, 5, 60 * 1000)
+    if (!portalRateLimit.allowed) {
+      return NextResponse.json(
+        { error: "リクエストが多すぎます。しばらく経ってから再度お試しください。" },
+        { status: 429, headers: { "Retry-After": String(portalRateLimit.retryAfter ?? 60) } },
+      )
+    }
+
     const { data: company } = await supabase
       .from("companies")
       .select("stripe_customer_id")
@@ -73,11 +90,9 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ url: portalSession.url })
   } catch (err) {
+    console.error("[POST /api/subscribe/portal] エラー:", err)
     return NextResponse.json(
-      {
-        error:
-          err instanceof Error ? err.message : "Customer ポータルセッションの作成に失敗しました",
-      },
+      { error: "Customer ポータルセッションの作成に失敗しました" },
       { status: 500 },
     )
   }
