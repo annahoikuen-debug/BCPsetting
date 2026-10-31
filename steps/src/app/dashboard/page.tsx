@@ -37,7 +37,8 @@ const DOC_TYPE_LABELS: Record<string, string> = {
 }
 
 export default async function DashboardPage() {
-  const cookieStore = await cookies()
+  // cookies() の呼び出し自体が動的レンダリングを強制する
+  await cookies()
   const supabase = await createClient()
 
   // 認証状態の確認
@@ -104,6 +105,9 @@ export default async function DashboardPage() {
 
   // 発行済みかどうか
   const isPurchased = !!company.purchased_at
+  // サブスク契約中かどうか（active / trialing は発行・編集が可能）
+  const subscriptionStatus = (company.subscription_status ?? "") as string
+  const isSubscribed = subscriptionStatus === "active" || subscriptionStatus === "trialing"
   const documentVersion = company.document_version ?? 0
   const createdAt = company.created_at
     ? new Date(company.created_at)
@@ -112,13 +116,16 @@ export default async function DashboardPage() {
     ? new Date(company.purchased_at)
     : null
 
-  // 7日間編集可能かどうか（購入後7日間）
-  // サーバーコンポーネントなので new Date() を使用
+  // 編集可能かどうか：
+  //   - サブスク契約中 → 編集・再発行ともに無制限
+  //   - 都度購入 → 購入後7日間のみ
+  // （サーバー側 upsertBcpDraft でも同一ルールを強制する）
   const now = new Date()
   const isEditable =
-    isPurchased &&
-    purchasedAt &&
-    now.getTime() - purchasedAt.getTime() <= 7 * 24 * 60 * 60 * 1000
+    isSubscribed ||
+    (isPurchased &&
+      !!purchasedAt &&
+      now.getTime() - purchasedAt.getTime() <= 7 * 24 * 60 * 60 * 1000)
 
   const latestVersionDocs = documents?.filter(
     (d) => d.version === documentVersion,
@@ -176,8 +183,12 @@ export default async function DashboardPage() {
           </div>
           <div className="bg-muted/50 p-4 rounded-lg">
             <p className="text-xs text-muted-foreground">購入状況</p>
-            <p className={`font-medium ${isPurchased ? "text-green-600" : "text-muted-foreground"}`}>
-              {isPurchased ? "購入済み" : "未購入"}
+            <p className={`font-medium ${isPurchased || isSubscribed ? "text-green-600" : "text-muted-foreground"}`}>
+              {isSubscribed
+                ? `サブスク契約中（${subscriptionStatus}）`
+                : isPurchased
+                  ? "購入済み"
+                  : "未購入"}
             </p>
           </div>
         </CardContent>
@@ -288,10 +299,17 @@ export default async function DashboardPage() {
               </div>
             )}
           </CardContent>
-          {!isPurchased && (
+          {!isPurchased && !isSubscribed && (
             <CardFooter className="pt-4 border-t">
               <Button asChild className="w-full">
                 <a href="/wizard/summary">ドキュメントを発行する</a>
+              </Button>
+            </CardFooter>
+          )}
+          {isSubscribed && (
+            <CardFooter className="pt-4 border-t">
+              <Button asChild className="w-full">
+                <a href="/wizard/summary">サブスクで発行する（無制限）</a>
               </Button>
             </CardFooter>
           )}
@@ -329,7 +347,8 @@ export default async function DashboardPage() {
               <p className="text-sm text-amber-700 mt-1">
                 策定後7日間を過ぎたため、策定データの編集・再発行は
                 ロックされています。ドキュメントの再ダウンロードは
-                引き続き可能です。
+                引き続き可能です。継続的に編集・発行を行う場合は
+                サブスクリプションへのご加入をご検討ください。
               </p>
             </div>
           </div>
@@ -342,11 +361,12 @@ export default async function DashboardPage() {
             <Edit className="size-5 text-green-600 mt-0.5" />
             <div>
               <h3 className="font-semibold text-green-800">
-                編集可能期間です
+                {isSubscribed ? "サブスクリプション契約中です" : "編集可能期間です"}
               </h3>
               <p className="text-sm text-green-700 mt-1">
-                購入後7日間以内のため、策定データの編集・再発行が
-                可能です。
+                {isSubscribed
+                  ? "契約期間中は策定データの編集・ドキュメントの再発行が無制限に行えます。"
+                  : "購入後7日間以内のため、策定データの編集・再発行が可能です。"}
               </p>
             </div>
           </div>

@@ -66,6 +66,33 @@ export async function upsertBcpDraft(
       return { success: false, error: "他社のデータにはアクセスできません" }
     }
 
+    // 編集ロック（購入後7日間）のサーバー側強制。
+    // WHY: ダッシュボードのボタン無効化だけでは Server Action を直接呼ばれた場合に
+    // 防げないため、ビジネスルール（都度購入者は購入後7日間のみ編集可能、
+    // サブスク契約者は無制限）をここでも検証する。
+    const { data: lockCompany } = await supabase
+      .from("companies")
+      .select("purchased_at, subscription_status")
+      .eq("id", companyId)
+      .maybeSingle()
+
+    if (lockCompany?.purchased_at) {
+      const subscriptionStatus = lockCompany.subscription_status as string | null
+      const isSubscribed =
+        subscriptionStatus === "active" || subscriptionStatus === "trialing"
+      if (!isSubscribed) {
+        const purchasedAtMs = new Date(lockCompany.purchased_at as string).getTime()
+        const EDIT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
+        if (Number.isFinite(purchasedAtMs) && Date.now() - purchasedAtMs > EDIT_WINDOW_MS) {
+          return {
+            success: false,
+            error:
+              "購入後7日間を過ぎたため編集できません。継続的な編集にはサブスクリプションをご利用ください。",
+          }
+        }
+      }
+    }
+
     let savedAny = false
     let companiesUpdated = false
     let maxCompletedStep = 0

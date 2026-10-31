@@ -13,7 +13,7 @@ vi.mock("@/lib/stripe", () => ({
 }))
 
 // ---------------------------------------------------------------------------
-// モック：Supabase Admin クライアント（ストレージ操作用）
+// モック：Supabase Admin クライアント（ストレージ操作・RPC 用）
 // ---------------------------------------------------------------------------
 const mockStorageUpload = vi.fn().mockResolvedValue({ error: null })
 const mockStorageCreateSignedUrl = vi.fn().mockResolvedValue({
@@ -23,11 +23,13 @@ const mockStorageFrom = vi.fn(() => ({
   upload: mockStorageUpload,
   createSignedUrl: mockStorageCreateSignedUrl,
 }))
+const mockRpc = vi.fn().mockResolvedValue({ data: 1, error: null })
 
 const mockCreateAdminClient = vi.fn(() => ({
   storage: {
     from: mockStorageFrom,
   },
+  rpc: mockRpc,
 }))
 
 vi.mock("@/lib/supabase/admin", () => ({
@@ -134,30 +136,16 @@ function setupProfileMock(companyId: string) {
   })
 }
 
-function setupCompanySelectMock() {
-  mockCompaniesChain.single.mockResolvedValueOnce({
-    data: {
-      id: "c1",
-      name: "テスト株式会社",
-      document_version: 0,
-      purchased_at: null,
-    },
+function setupBcpInputsExistMock() {
+  // processPayment の事前存在確認（maybeSingle）
+  mockBcpInputsChain.maybeSingle.mockResolvedValueOnce({
+    data: { company_id: "c1" },
     error: null,
   })
 }
 
-function setupOrdersSelectMock(existing: boolean) {
-  mockOrdersChain.single.mockResolvedValueOnce({
-    data: existing ? { id: "o1", company_id: "c1" } : null,
-    error: existing ? null : { code: "PGRST116" },
-  })
-}
-
-function setupOrdersInsertMock() {
-  mockOrdersChain.insert.mockResolvedValue({ error: null })
-}
-
 function setupBcpInputsSelectMock() {
+  // generateAndStoreDocuments 内のドラフト取得（single）
   mockBcpInputsChain.single.mockResolvedValueOnce({
     data: {
       company_id: "c1",
@@ -171,20 +159,38 @@ function setupBcpInputsSelectMock() {
   })
 }
 
-function setupGeneratedDocumentsUpsertMock() {
-  mockGeneratedDocumentsChain.upsert.mockResolvedValue({ error: null })
-}
-
-function setupCompaniesUpdateMock() {
-  // バージョン確認用の companies.select().single() もモック化
+function setupCompanySelectMock() {
   mockCompaniesChain.single.mockResolvedValueOnce({
-    data: { document_version: 1 },
+    data: {
+      id: "c1",
+      name: "テスト株式会社",
+      representative: null,
+      industry: "オフィス",
+      address: "東京都",
+      employee_scale: "10-49名",
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: null,
+      purchased_at: null,
+      document_version: 0,
+      is_completed: false,
+    },
     error: null,
   })
 }
 
-function setupBcpInputsUpdateMock() {
-  // 同様に makeChain で対応済み
+function setupOrdersSelectMock(existing: boolean) {
+  mockOrdersChain.maybeSingle.mockResolvedValueOnce({
+    data: existing ? { id: "o1", company_id: "c1" } : null,
+    error: existing ? null : { code: "PGRST116" },
+  })
+}
+
+function setupOrdersInsertMock() {
+  mockOrdersChain.insert.mockResolvedValue({ error: null })
+}
+
+function setupGeneratedDocumentsUpsertMock() {
+  mockGeneratedDocumentsChain.upsert.mockResolvedValue({ error: null })
 }
 
 // ---------------------------------------------------------------------------
@@ -193,6 +199,11 @@ function setupBcpInputsUpdateMock() {
 beforeEach(() => {
   vi.clearAllMocks()
   authMock()
+  mockStorageUpload.mockResolvedValue({ error: null })
+  mockStorageCreateSignedUrl.mockResolvedValue({
+    data: { signedUrl: "https://signed.example.com/file.pdf" },
+  })
+  mockRpc.mockResolvedValue({ data: 1, error: null })
 })
 
 describe("processPayment (orders.amount recorded from Stripe)", () => {
@@ -206,18 +217,18 @@ describe("processPayment (orders.amount recorded from Stripe)", () => {
     mockRetrieve.mockResolvedValue({
       id: sessionId,
       payment_status: "paid",
+      mode: "payment",
       metadata: { company_id: "c1", user_id: "u1" },
       amount_total: amountTotal,
     } as never)
 
     setupProfileMock("c1")
+    setupBcpInputsExistMock()
     setupOrdersSelectMock(false) // 既存 orders なし
-    setupCompanySelectMock()
     setupOrdersInsertMock()
+    setupCompanySelectMock()
     setupBcpInputsSelectMock()
     setupGeneratedDocumentsUpsertMock()
-    setupCompaniesUpdateMock()
-    setupBcpInputsUpdateMock()
 
     const result = await processPayment(sessionId)
 
@@ -231,18 +242,60 @@ describe("processPayment (orders.amount recorded from Stripe)", () => {
     expect(firstCall[0].stripe_session_id).toBe(sessionId)
   })
 
-  it("冪等性：既存 orders がある場合は insert が呼ばれず、amount の上書きは行われない", async () => {
+  it("BCP ドラフトが存在しない場合は orders を作成せずエラーを返す（支払済み不整合の防止）", async () => {
     const processPayment = await importProcessPayment()
 
     mockRetrieve.mockResolvedValue({
       id: sessionId,
       payment_status: "paid",
+      mode: "payment",
       metadata: { company_id: "c1", user_id: "u1" },
       amount_total: amountTotal,
     } as never)
 
     setupProfileMock("c1")
+    // ドラフト不在
+    mockBcpInputsChain.maybeSingle.mockResolvedValueOnce({
+      data: null,
+      error: { code: "PGRST116" },
+    })
+
+    const result = await processPayment(sessionId)
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain("BCP 策定データ")
+    // 注文レコードは作成されないこと
+    expect(mockOrdersChain.insert).not.toHaveBeenCalled()
+  })
+
+  it("冪等性：既存 orders かつ文書がある場合は insert されず冪等成功を返す", async () => {
+    const processPayment = await importProcessPayment()
+
+    mockRetrieve.mockResolvedValue({
+      id: sessionId,
+      payment_status: "paid",
+      mode: "payment",
+      metadata: { company_id: "c1", user_id: "u1" },
+      amount_total: amountTotal,
+    } as never)
+
+    setupProfileMock("c1")
+    setupBcpInputsExistMock()
     setupOrdersSelectMock(true) // 既存 orders あり
+    // 既存文書あり（select().eq().order().order() のため、1回目はチェーン、
+    // 2回目が最終値を返す）
+    mockGeneratedDocumentsChain.order
+      .mockReturnValueOnce(mockGeneratedDocumentsChain)
+      .mockResolvedValueOnce({
+        data: [
+          { doc_type: "bcp_full", file_url: "c1/bcp_full_v1.pdf", version: 1 },
+        ],
+        error: null,
+      })
+    mockCompaniesChain.single.mockResolvedValueOnce({
+      data: { name: "テスト株式会社" },
+      error: null,
+    })
 
     const result = await processPayment(sessionId)
 
@@ -251,5 +304,69 @@ describe("processPayment (orders.amount recorded from Stripe)", () => {
 
     // orders.insert が呼ばれていないこと
     expect(mockOrdersChain.insert).not.toHaveBeenCalled()
+  })
+
+  it("既存 orders はあるが文書が無い場合（過去の生成失敗）は注文を重複作成せず生成を再試行する", async () => {
+    const processPayment = await importProcessPayment()
+
+    mockRetrieve.mockResolvedValue({
+      id: sessionId,
+      payment_status: "paid",
+      mode: "payment",
+      metadata: { company_id: "c1", user_id: "u1" },
+      amount_total: amountTotal,
+    } as never)
+
+    setupProfileMock("c1")
+    setupBcpInputsExistMock()
+    setupOrdersSelectMock(true) // 既存 orders あり
+    // 既存文書なし（過去の生成失敗）: 1回目はチェーン、2回目が最終値
+    mockGeneratedDocumentsChain.order
+      .mockReturnValueOnce(mockGeneratedDocumentsChain)
+      .mockResolvedValueOnce({ data: [], error: null })
+    setupCompanySelectMock()
+    setupBcpInputsSelectMock()
+    setupGeneratedDocumentsUpsertMock()
+
+    const result = await processPayment(sessionId)
+
+    expect(result.success).toBe(true)
+    // 注文は重複作成されないこと
+    expect(mockOrdersChain.insert).not.toHaveBeenCalled()
+    // 生成処理（バージョン採番 RPC・文書登録）が実行されていること
+    expect(mockRpc).toHaveBeenCalled()
+    expect(mockGeneratedDocumentsChain.upsert).toHaveBeenCalled()
+  })
+
+  it("バージョン採番は service_role の RPC で原子的に行われる", async () => {
+    const processPayment = await importProcessPayment()
+
+    mockRetrieve.mockResolvedValue({
+      id: sessionId,
+      payment_status: "paid",
+      mode: "payment",
+      metadata: { company_id: "c1", user_id: "u1" },
+      amount_total: amountTotal,
+    } as never)
+
+    setupProfileMock("c1")
+    setupBcpInputsExistMock()
+    setupOrdersSelectMock(false)
+    setupOrdersInsertMock()
+    setupCompanySelectMock()
+    setupBcpInputsSelectMock()
+    setupGeneratedDocumentsUpsertMock()
+
+    const result = await processPayment(sessionId)
+
+    expect(result.success).toBe(true)
+    // RPC が company_id を引数に呼ばれていること
+    expect(mockRpc).toHaveBeenCalledWith("increment_document_version", {
+      p_company_id: "c1",
+    })
+    // 文書は採番されたバージョンで登録されていること
+    const upsertCalls = mockGeneratedDocumentsChain.upsert.mock
+      .calls as unknown as Array<Array<Record<string, unknown>[]>>
+    expect(upsertCalls[0][0][0].version).toBe(1)
   })
 })

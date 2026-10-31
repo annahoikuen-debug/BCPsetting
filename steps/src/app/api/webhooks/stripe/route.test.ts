@@ -12,8 +12,10 @@ vi.mock("next/headers", () => ({
 // モック：Stripe クライアント
 // ---------------------------------------------------------------------------
 const mockConstructEvent = vi.fn()
+const mockRetrieveSubscription = vi.fn()
 const mockGetStripe = vi.fn(() => ({
   webhooks: { constructEvent: mockConstructEvent },
+  subscriptions: { retrieve: mockRetrieveSubscription },
 }))
 
 vi.mock("@/lib/stripe", () => ({
@@ -88,6 +90,7 @@ beforeEach(() => {
   mockUpsert.mock.calls = []
   mockUpdate.mock.calls = []
   mockConstructEvent.mock.calls = []
+  mockRetrieveSubscription.mock.calls = []
   mockFrom.mock.calls = []
   mockCreateAdminClient.mock.calls = []
 
@@ -183,5 +186,142 @@ describe("POST /api/webhooks/stripe", () => {
 
     expect(res.status).toBe(400)
     expect(json.error).toContain("署名検証に失敗しました")
+  })
+
+  it("invoice.payment_succeeded（endive の parent 形状）で継続課金が記録される", async () => {
+    const POST = await importHandler()
+
+    // dedup チェック（未登録）→ 会社検索（ヒット）の順に single が呼ばれる
+    mockSingle.mockResolvedValueOnce({ data: null, error: { code: "PGRST116" } })
+    mockSingle.mockResolvedValueOnce({
+      data: { id: "c1", subscription_status: "active", subscription_plan: "monthly" },
+      error: null,
+    })
+
+    mockConstructEvent.mockResolvedValueOnce({
+      id: "evt_invoice_1",
+      type: "invoice.payment_succeeded",
+      data: {
+        object: {
+          id: "in_1",
+          customer: "cus_1",
+          amount_total: 1480,
+          // Stripe API endive (2026-09-30) 形状: トップレベル subscription は存在しない
+          parent: {
+            subscription_details: { subscription: "sub_1" },
+          },
+        },
+      },
+    } as never)
+
+    const req = makeRequest({ body: '{"id":"evt_invoice_1"}' })
+    const res = await POST(req as Request)
+    const json = await res.json()
+
+    expect(res.status).toBe(200)
+    expect(json.received).toBe(true)
+
+    // orders.insert に継続課金レコードが記録されること
+    const orderInserts = mockInsert.mock.calls.filter(
+      (call) => call[0] && call[0].plan_type === "subscription",
+    )
+    expect(orderInserts).toHaveLength(1)
+    expect(orderInserts[0][0]).toMatchObject({
+      company_id: "c1",
+      stripe_session_id: "in_1",
+      amount: 1480,
+    })
+
+    // companies.update で subscription_status が active に更新されること
+    const companyUpdates = mockUpdate.mock.calls.filter(
+      (call) => call[0] && call[0].subscription_status === "active",
+    )
+    expect(companyUpdates.length).toBeGreaterThanOrEqual(1)
+  })
+
+  it("サブスクの checkout.session.completed では Subscription を取得して実ステータスを保存する", async () => {
+    const POST = await importHandler()
+
+    mockRetrieveSubscription.mockResolvedValueOnce({
+      id: "sub_1",
+      status: "active",
+      cancel_at_period_end: false,
+      items: { data: [{ current_period_end: 1893456000 }] },
+    } as never)
+
+    mockConstructEvent.mockResolvedValueOnce({
+      id: "evt_sub_1",
+      type: "checkout.session.completed",
+      data: {
+        object: {
+          id: "cs_sub_1",
+          mode: "subscription",
+          status: "complete", // セッション状態（保存してはいけない値）
+          customer: "cus_1",
+          subscription: "sub_1",
+          metadata: { company_id: "c1", user_id: "u1", plan: "monthly" },
+        },
+      },
+    } as never)
+
+    const req = makeRequest({ body: '{"id":"evt_sub_1"}' })
+    const res = await POST(req as Request)
+    const json = await res.json()
+
+    expect(res.status).toBe(200)
+    expect(json.received).toBe(true)
+
+    // Stripe からサブスクリプションが取得されていること
+    expect(mockRetrieveSubscription).toHaveBeenCalledWith("sub_1")
+
+    // companies.update に Subscription の実ステータスが保存されていること
+    // （session.status の "complete" であってはならない）
+    const companyUpdates = mockUpdate.mock.calls.filter(
+      (call) => call[0] && call[0].subscription_status !== undefined,
+    )
+    expect(companyUpdates.length).toBeGreaterThanOrEqual(1)
+    expect(companyUpdates[0][0]).toMatchObject({
+      subscription_status: "active",
+      stripe_subscription_id: "sub_1",
+      subscription_plan: "monthly",
+    })
+  })
+
+  it("customer.subscription.updated（endive 形状）で期間終了日が items から取得される", async () => {
+    const POST = await importHandler()
+
+    mockSingle.mockResolvedValueOnce({ data: null, error: { code: "PGRST116" } })
+    mockSingle.mockResolvedValueOnce({ data: { id: "c1" }, error: null })
+
+    mockConstructEvent.mockResolvedValueOnce({
+      id: "evt_subupd_1",
+      type: "customer.subscription.updated",
+      data: {
+        object: {
+          id: "sub_1",
+          status: "past_due",
+          cancel_at_period_end: true,
+          // endive ではトップレベル current_period_end は削除済み
+          items: { data: [{ current_period_end: 1893456000 }] },
+        },
+      },
+    } as never)
+
+    const req = makeRequest({ body: '{"id":"evt_subupd_1"}' })
+    const res = await POST(req as Request)
+    const json = await res.json()
+
+    expect(res.status).toBe(200)
+    expect(json.received).toBe(true)
+
+    const companyUpdates = mockUpdate.mock.calls.filter(
+      (call) => call[0] && call[0].subscription_status !== undefined,
+    )
+    expect(companyUpdates.length).toBeGreaterThanOrEqual(1)
+    expect(companyUpdates[0][0]).toMatchObject({
+      subscription_status: "past_due",
+      subscription_cancel_at_period_end: true,
+      subscription_current_period_end: new Date(1893456000 * 1000).toISOString(),
+    })
   })
 })

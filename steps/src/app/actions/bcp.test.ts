@@ -59,6 +59,17 @@ function setupProfileMock(companyId: string) {
   mockSingle.mockResolvedValueOnce({ data: { company_id: companyId }, error: null })
 }
 
+/**
+ * 編集ロック判定用の companies 取得（maybeSingle）をモックする。
+ * upsertBcpDraft は profiles の次にこのクエリを発行するため、
+ * bcp_inputs の step_status 取得より先に 1 スロット消費する。
+ */
+function setupEditLockMock(
+  company: { purchased_at: string | null; subscription_status: string | null } | null,
+) {
+  mockMaybeSingle.mockResolvedValueOnce({ data: company, error: null })
+}
+
 function setupCompanyUpsertMock() {
   mockUpsert.mockResolvedValue({ error: null })
 }
@@ -103,6 +114,7 @@ describe("upsertBcpDraft (step_status 退行防止)", () => {
   it("既存 step_status が 3 で step2 以降が検証通過の場合、step_status は最大値（4）に更新される（退行防止）", async () => {
     const upsertBcpDraft = await importUpsertBcpDraft()
 
+    setupEditLockMock({ purchased_at: null, subscription_status: null })
     setupCompanyUpsertMock()
     setupBcpInputsSelectMock(3)
     setupBcpInputsUpsertMock()
@@ -133,6 +145,7 @@ describe("upsertBcpDraft (step_status 退行防止)", () => {
   it("既存 step_status が 1 で step4 のみ検証通過の場合、step_status は 4 に更新される", async () => {
     const upsertBcpDraft = await importUpsertBcpDraft()
 
+    setupEditLockMock({ purchased_at: null, subscription_status: null })
     setupCompanyUpsertMock()
     setupBcpInputsSelectMock(1)
     setupBcpInputsUpsertMock()
@@ -163,6 +176,7 @@ describe("upsertBcpDraft (step_status 退行防止)", () => {
     const upsertBcpDraft = await importUpsertBcpDraft()
 
     // step1 は空（未入力）なので companies upsert は呼ばれない
+    setupEditLockMock({ purchased_at: null, subscription_status: null })
     setupBcpInputsSelectMock(0)
     setupBcpInputsUpsertMock()
     setupCompanyUpdateMock()
@@ -183,5 +197,52 @@ describe("upsertBcpDraft (step_status 退行防止)", () => {
     // companies.update が呼ばれ、eq("id", "c1") で絞り込まれていること
     expect(mockUpdate).toHaveBeenCalled()
     expect(mockEq).toHaveBeenCalledWith("id", "c1")
+  })
+
+  it("購入後7日を過ぎた都度購入者は編集を拒否され、保存は行われない（H1: サーバー側強制）", async () => {
+    const upsertBcpDraft = await importUpsertBcpDraft()
+
+    // 8日前に購入（サブスクなし）
+    const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString()
+    setupEditLockMock({ purchased_at: eightDaysAgo, subscription_status: null })
+
+    const data = {
+      step1: validStep1,
+      step2: [{ type: "安全確保", priority: "高", text: "方針" }],
+      step3: [],
+      step4: [],
+      step5: { responseHead: "", deputy: "", safetyCheckPerson: "", keyPartners: [] },
+      step6: { backupMethod: "", stockpileItems: [], fundingPlan: "未定", hasInsurance: false },
+    }
+
+    const result = await upsertBcpDraft(data as unknown as BcpWizardInput, "c1")
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain("7日間")
+    // 保存処理（companies upsert / bcp_inputs upsert）が行われないこと
+    expect(mockUpsert).not.toHaveBeenCalled()
+  })
+
+  it("購入後7日を過ぎていてもサブスク契約中なら編集できる", async () => {
+    const upsertBcpDraft = await importUpsertBcpDraft()
+
+    // 30日前に購入したが、サブスク契約中
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
+    setupEditLockMock({ purchased_at: thirtyDaysAgo, subscription_status: "active" })
+    setupBcpInputsSelectMock(0)
+    setupBcpInputsUpsertMock()
+
+    const data = {
+      step1: validStep1,
+      step2: [{ type: "安全確保", priority: "高", text: "方針" }],
+      step3: [],
+      step4: [],
+      step5: { responseHead: "", deputy: "", safetyCheckPerson: "", keyPartners: [] },
+      step6: { backupMethod: "", stockpileItems: [], fundingPlan: "未定", hasInsurance: false },
+    }
+
+    const result = await upsertBcpDraft(data as unknown as BcpWizardInput, "c1")
+
+    expect(result.success).toBe(true)
   })
 })

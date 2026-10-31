@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "steps/**"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    paths:
+      - "steps/**"
+      - ".github/workflows/ci.yml"
+
+jobs:
+  quality:
+    name: Typecheck / Lint / Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        # リポジトリルート直下の steps/ が Next.js プロジェクト
+        working-directory: steps
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: steps/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Lint
+        run: npx eslint .
+
+      - name: Test
+        run: npm test

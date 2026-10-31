@@ -26,9 +26,10 @@ import {
 } from "@/components/ui/dialog"
 import { Separator } from "@/components/ui/separator"
 import { Badge } from "@/components/ui/badge"
-import { ArrowLeft, CreditCard } from "lucide-react"
+import { ArrowLeft, CreditCard, FileDown } from "lucide-react"
 import Link from "next/link"
 import { getBcpDraft } from "@/app/actions/bcp"
+import { issueSubscriptionDocuments } from "@/app/actions/documents"
 import { createClient } from "@/lib/supabase/client"
 
 /**
@@ -106,10 +107,25 @@ const FUNDING_LABELS: Record<string, string> = {
   未定: "未定",
 }
 
+interface IssuedDoc {
+  docType: string
+  fileUrl: string
+}
+
+const DOC_TYPE_LABELS: Record<string, string> = {
+  bcp_full: "事業継続計画書 (BCP)",
+  action_manual: "非常時初動対応マニュアル",
+  pocket_card: "携帯用アクションカード",
+}
+
 export default function SummaryPage() {
   const [summaryData, setSummaryData] = useState<SummaryData | null>(null)
   const [loading, setLoading] = useState(true)
   const [paymentOpen, setPaymentOpen] = useState(false)
+  const [isSubscribed, setIsSubscribed] = useState(false)
+  const [issuing, setIssuing] = useState(false)
+  const [issueError, setIssueError] = useState<string | null>(null)
+  const [issuedDocs, setIssuedDocs] = useState<IssuedDoc[] | null>(null)
 
   const handleCheckout = async (plan: "one_time" | "monthly") => {
     setPaymentOpen(false)
@@ -134,6 +150,33 @@ export default function SummaryPage() {
     }
   }
 
+  const handleSubscriptionIssue = async () => {
+    setIssuing(true)
+    setIssueError(null)
+    try {
+      const supabase = createClient()
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("company_id")
+        .eq("id", (await supabase.auth.getUser()).data.user?.id ?? "")
+        .single()
+      if (!profile?.company_id) {
+        setIssueError("会社情報が見つかりません")
+        return
+      }
+      const result = await issueSubscriptionDocuments(profile.company_id)
+      if (result.success && result.documents) {
+        setIssuedDocs(result.documents)
+      } else {
+        setIssueError(result.error ?? "発行に失敗しました")
+      }
+    } catch {
+      setIssueError("発行に失敗しました")
+    } finally {
+      setIssuing(false)
+    }
+  }
+
   useEffect(() => {
     let mounted = true
     const loadDraft = async () => {
@@ -152,6 +195,16 @@ export default function SummaryPage() {
         if (!profile?.company_id) {
           setLoading(false)
           return
+        }
+        // サブスク契約状態を取得（契約中なら決済なしで発行できる）
+        const { data: company } = await supabase
+          .from("companies")
+          .select("subscription_status")
+          .eq("id", profile.company_id)
+          .single()
+        const status = company?.subscription_status ?? ""
+        if (mounted && (status === "active" || status === "trialing")) {
+          setIsSubscribed(true)
         }
         const { data: draft } = await getBcpDraft(profile.company_id)
         if (mounted && draft) {
@@ -623,21 +676,66 @@ export default function SummaryPage() {
             決済を完了すると、透かしなしの PDF 形式で事業継続計画書および初動対応マニュアルを発行できます。
           </CardDescription>
         </CardHeader>
-        <CardContent className="pb-0">
-          <p className="text-sm text-muted-foreground mb-4">
-            発行には有料プランへの加入が必要です。プランを選択して決済にお進みください。
-          </p>
-          <div className="space-y-3">
-            <Button
-              size="lg"
-              className="w-full"
-              onClick={() => setPaymentOpen(true)}
-            >
-              <CreditCard className="mr-2 size-4" />
-              決済プランを選択して発行する
-            </Button>
-          </div>
-        </CardContent>
+        {isSubscribed ? (
+          <CardContent>
+            <p className="text-sm text-muted-foreground mb-4">
+              サブスクリプション契約中のため、追加決済なしで何度でも発行できます。
+            </p>
+            {issuedDocs ? (
+              <div className="space-y-3">
+                <p className="text-sm font-medium text-green-700">
+                  ドキュメントを発行しました（1時間有効のリンク）
+                </p>
+                {issuedDocs.map((doc) => (
+                  <Button key={doc.docType} asChild variant="outline" className="w-full justify-between">
+                    <a href={doc.fileUrl} target="_blank" rel="noopener noreferrer">
+                      <span>{DOC_TYPE_LABELS[doc.docType] ?? doc.docType}</span>
+                      <FileDown className="size-4" />
+                    </a>
+                  </Button>
+                ))}
+                <Button
+                  variant="ghost"
+                  className="w-full"
+                  onClick={() => setIssuedDocs(null)}
+                >
+                  新しいバージョンを発行する
+                </Button>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <Button
+                  size="lg"
+                  className="w-full"
+                  onClick={handleSubscriptionIssue}
+                  disabled={issuing}
+                >
+                  <FileDown className="mr-2 size-4" />
+                  {issuing ? "発行中…" : "サブスクで発行する（無制限）"}
+                </Button>
+                {issueError && (
+                  <p className="text-sm text-destructive">{issueError}</p>
+                )}
+              </div>
+            )}
+          </CardContent>
+        ) : (
+          <CardContent className="pb-0">
+            <p className="text-sm text-muted-foreground mb-4">
+              発行には有料プランへの加入が必要です。プランを選択して決済にお進みください。
+            </p>
+            <div className="space-y-3">
+              <Button
+                size="lg"
+                className="w-full"
+                onClick={() => setPaymentOpen(true)}
+              >
+                <CreditCard className="mr-2 size-4" />
+                決済プランを選択して発行する
+              </Button>
+            </div>
+          </CardContent>
+        )}
       </Card>
 
       {/* 決済モーダル */}

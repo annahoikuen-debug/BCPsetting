@@ -21,6 +21,7 @@
  *   - またはクエリパラメータ ?secret=<CRON_SECRET>
  */
 import { NextResponse } from "next/server"
+import { createHash, timingSafeEqual } from "node:crypto"
 import { createAdminClient } from "@/lib/supabase/admin"
 
 interface ReminderResult {
@@ -29,6 +30,17 @@ interface ReminderResult {
   email: string
   success: boolean
   error?: string
+}
+
+/**
+ * シークレットを定数時間で比較する。
+ * WHY: === での直接比較は早期リターンによりタイミング差が漏れるため、
+ * SHA-256 ハッシュ化後に timingSafeEqual で比較する。
+ */
+function secretsMatch(provided: string, expected: string): boolean {
+  const a = createHash("sha256").update(provided).digest()
+  const b = createHash("sha256").update(expected).digest()
+  return timingSafeEqual(a, b)
 }
 
 /**
@@ -147,9 +159,12 @@ async function sendReminderEmail(
 }
 
 export async function GET(req: Request) {
-  // CRON_SECRET による認証（ヘッダーまたはクエリパラメータ）
-  const headerList = await req.headers
-  const authHeader = headerList.get("authorization") ?? ""
+  // CRON_SECRET による認証（ヘッダーまたはクエリパラメータ）。
+  // WHY: String.replace は null を返さないため旧実装の
+  // 「replace(...) ?? searchParams.get(...)」はクエリパラメータに到達しない
+  // デッドコードだった。正規表現の exec は不一致時に null を返すため
+  // ?? のフォールバックが機能する。
+  const authHeader = req.headers.get("authorization") ?? ""
   const cronSecret = process.env.CRON_SECRET
 
   if (!cronSecret) {
@@ -159,12 +174,11 @@ export async function GET(req: Request) {
     )
   }
 
+  const bearerMatch = /^Bearer\s+(.+)$/i.exec(authHeader)
   const providedSecret =
-    authHeader.replace(/^Bearer\s/i, "") ??
-    new URL(req.url).searchParams.get("secret") ??
-    ""
+    bearerMatch?.[1] ?? new URL(req.url).searchParams.get("secret") ?? ""
 
-  if (providedSecret !== cronSecret) {
+  if (!secretsMatch(providedSecret, cronSecret)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
@@ -179,7 +193,7 @@ export async function GET(req: Request) {
 
     const { data: companies, error: companiesError } = await admin
       .from("companies")
-      .select("id, name, updated_at")
+      .select("id, name, updated_at, last_reminded_at")
       .is("purchased_at", null)
       .or(
         `updated_at.is.null,updated_at.lte.${cutoffIso}`,
@@ -193,7 +207,20 @@ export async function GET(req: Request) {
       )
     }
 
-    if (!companies || companies.length === 0) {
+    // 送信履歴による重複防止：同一データ（updated_at）に対するリマインドは
+    // 1 回のみ。last_reminded_at が updated_at 以降なら既に送信済み。
+    // WHY: 送信履歴がない場合、cron の実行頻度に関係なく毎回全員に
+    // 再送されていた。
+    const pendingCompanies = (companies ?? []).filter((company) => {
+      if (!company.last_reminded_at) return true
+      const lastSent = new Date(company.last_reminded_at as string).getTime()
+      const updatedAt = company.updated_at
+        ? new Date(company.updated_at as string).getTime()
+        : 0
+      return lastSent < updatedAt
+    })
+
+    if (pendingCompanies.length === 0) {
       return NextResponse.json({
         success: true,
         message: "リマインド対象の会社はありません",
@@ -204,7 +231,7 @@ export async function GET(req: Request) {
     // 各会社に対してリマインドメールを送信
     const results: ReminderResult[] = []
 
-    for (const company of companies) {
+    for (const company of pendingCompanies) {
       // プロフィールからメールアドレスを取得
       const { data: profiles } = await admin
         .from("profiles")
@@ -232,6 +259,15 @@ export async function GET(req: Request) {
         email,
         ...result,
       })
+
+      // 送信に成功した場合のみ履歴を記録する。
+      // 失敗時は記録しないことで、次回実行時に再送を試みる。
+      if (result.success) {
+        await admin
+          .from("companies")
+          .update({ last_reminded_at: new Date().toISOString() })
+          .eq("id", company.id)
+      }
     }
 
     const successCount = results.filter((r) => r.success).length

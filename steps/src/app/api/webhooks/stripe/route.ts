@@ -47,6 +47,23 @@ import { getStripe } from "@/lib/stripe"
 /** Stripe Webhook 署名検証用シークレット（.env.local に設定） */
 const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET
 
+/**
+ * サブスクリプションの現在の課金期間終了日を ISO 文字列で取得する。
+ *
+ * WHY: Stripe API endive (2026-09-30) では Subscription のトップレベル
+ * current_period_end は削除され、subscription items 配下に移動した。
+ * 旧 API バージョンで動く Webhook エンドポイント設定にも備え、
+ * 旧トップレベルフィールドにもフォールバックする。
+ */
+function extractCurrentPeriodEnd(subscription: Stripe.Subscription): string | null {
+  const itemPeriodEnd = subscription.items.data[0]?.current_period_end
+  const legacyPeriodEnd = (
+    subscription as unknown as { current_period_end?: number | null }
+  ).current_period_end
+  const periodEnd = itemPeriodEnd ?? legacyPeriodEnd
+  return periodEnd ? new Date(periodEnd * 1000).toISOString() : null
+}
+
 export async function POST(req: Request) {
   // Webhook 署名検証には生のリクエストボディが必要なため、
   // text() で取得する（JSON パース前）。
@@ -106,15 +123,20 @@ export async function POST(req: Request) {
         const isSubscription = session.mode === "subscription"
 
         if (isSubscription) {
-          // サブスクリプション開始：顧客・サブスクリプション情報を記録
+          // サブスクリプション開始：顧客・サブスクリプション情報を記録。
+          // WHY: Checkout Session の status は "complete" などのセッション状態であり、
+          // サブスクの状態（active 等）ではない。実ステータスを Stripe から取得する。
           const customerId = session.customer as string
           const subscriptionId = session.subscription as string
+          const subscription = await getStripe().subscriptions.retrieve(subscriptionId)
 
           await supabase.from("companies").update({
             stripe_customer_id: customerId,
             stripe_subscription_id: subscriptionId,
-            subscription_status: session.status,
+            subscription_status: subscription.status,
             subscription_plan: (session.metadata?.plan as "monthly" | "yearly") ?? null,
+            subscription_current_period_end: extractCurrentPeriodEnd(subscription),
+            subscription_cancel_at_period_end: subscription.cancel_at_period_end ?? false,
           }).eq("id", companyId)
         } else {
           // 一時購入：orders テーブルに paid ステータスでレコード作成（冪等性：stripe_session_id の unique 制約で重複防止）
@@ -142,12 +164,30 @@ export async function POST(req: Request) {
       }
 
       case "invoice.payment_succeeded": {
-        const invoice = event.data.object as Stripe.Invoice & {
-          subscription: string
-          amount_total: number
-        }
-        const subscriptionId = invoice.subscription
+        const invoice = event.data.object as Stripe.Invoice
+        // サブスクリプション ID の取得。
+        // WHY: Stripe API 2025-03-31 (basil) 以降、Invoice のトップレベル
+        // subscription フィールドは削除され、parent.subscription_details.subscription
+        // に移動した（本プロジェクトの stripe v23 がピン留めする endive でも同様）。
+        // 古い API バージョンの Webhook エンドポイント設定でも動くよう、
+        // 旧フィールドにもフォールバックする。
+        const legacySubscriptionId = (
+          invoice as unknown as { subscription?: string | null }
+        ).subscription
+        const subscriptionId =
+          invoice.parent?.subscription_details?.subscription ??
+          legacySubscriptionId ??
+          null
         const customerId = invoice.customer as string
+
+        if (typeof subscriptionId !== "string" || !subscriptionId) {
+          // サブスクに関連しない請求書（都度請求など）。再送しても処理できないため
+          // 200 を返して受理完了とする。
+          console.warn(
+            "[POST /api/webhooks/stripe] invoice.payment_succeeded: サブスクリプション参照がなくスキップします",
+          )
+          break
+        }
 
         // サブスクリプション ID から会社を特定
         const { data: company } = await supabase
@@ -172,13 +212,21 @@ export async function POST(req: Request) {
           })
           .eq("id", company.id)
 
-        // orders テーブルに継続課金レコードを作成
+        // orders テーブルに継続課金レコードを作成。
+        // WHY: endive (2026-09-30) では Invoice のトップレベル amount_total は
+        // 削除されている。amount_paid（実際の入金額）を優先し、旧 API 形状に
+        // 備えて amount_total にもフォールバックする。
+        const legacyAmountTotal = (
+          invoice as unknown as { amount_total?: number | null }
+        ).amount_total
+        const paidAmount = invoice.amount_paid ?? legacyAmountTotal ?? 0
+
         await supabase.from("orders").insert({
           company_id: company.id,
           stripe_session_id: invoice.id,
           plan_type: "subscription",
           status: "paid",
-          amount: invoice.amount_total,
+          amount: paidAmount,
         })
 
         break
@@ -207,11 +255,9 @@ export async function POST(req: Request) {
         break
       }
 
+      case "customer.subscription.created":
       case "customer.subscription.updated": {
-        const subscription = event.data.object as Stripe.Subscription & {
-          current_period_end: number
-          cancel_at_period_end: boolean
-        }
+        const subscription = event.data.object as Stripe.Subscription
         const subscriptionId = subscription.id
 
         const { data: company } = await supabase
@@ -227,15 +273,11 @@ export async function POST(req: Request) {
           )
         }
 
-        const currentPeriodEnd = subscription.current_period_end
-          ? new Date(subscription.current_period_end * 1000).toISOString()
-          : null
-
         await supabase
           .from("companies")
           .update({
             subscription_status: subscription.status,
-            subscription_current_period_end: currentPeriodEnd,
+            subscription_current_period_end: extractCurrentPeriodEnd(subscription),
             subscription_cancel_at_period_end:
               subscription.cancel_at_period_end ?? false,
           })

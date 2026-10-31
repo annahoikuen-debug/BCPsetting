@@ -1,36 +1,30 @@
 import { createServerClient } from "@supabase/ssr"
-import { cookies } from "next/headers"
 import { NextResponse, type NextRequest } from "next/server"
 
 /**
- * 認証状態に基づくルート保護ミドルウェア。
+ * 認証状態に基づくルート保護プロキシ。
  *
  * - /wizard, /dashboard 以下は未認証時 /login へリダイレクト
  * - /login, /signup は認証済み時 /wizard へリダイレクト
  *
- * src/proxy.ts と同じロジックを Next.js ミドルウェアとして配置し、
- * エッジで認証ルート保護を強制する。
+ * WHY: Next.js 16 では middleware.js は deprecated となり proxy.js への改名が
+ * 推奨されている（node_modules/next/dist/docs 参照）。旧 src/middleware.ts から
+ * 移行した。Cookie アクセスはプロキシの規約に従い request.cookies /
+ * response.cookies を使用する（next/headers の cookies() は Server Component /
+ * Server Function / Route Handler 用）。
+ *
+ * セキュリティヘッダー（X-Frame-Options 等）は next.config.ts の headers() で
+ * 全ルートに適用されるため、ここでは認証リダイレクトのみを担う。
  */
-
-/** セキュリティヘッダーをレスポンスに付与する */
-function withSecurityHeaders(response: NextResponse): NextResponse {
-  response.headers.set("X-Frame-Options", "DENY")
-  response.headers.set("X-Content-Type-Options", "nosniff")
-  response.headers.set("Referrer-Policy", "strict-origin-when-cross-origin")
-  return response
-}
-
-export async function middleware(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   const response = NextResponse.next({
-    request: { headers: request.headers },
+    request,
   })
-
-  const cookieStore = await cookies()
 
   // 環境変数が未設定の場合（例: .env.local 未作成）は認証チェックをスキップ。
   // 本番運用時は NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY を必ず設定すること。
   if (!process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) {
-    return withSecurityHeaders(response)
+    return response
   }
 
   const supabase = createServerClient(
@@ -38,10 +32,12 @@ export async function middleware(request: NextRequest) {
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
       cookies: {
-        async getAll() {
-          return cookieStore.getAll()
+        getAll() {
+          return request.cookies.getAll()
         },
-        async setAll(cookiesToSet) {
+        setAll(cookiesToSet) {
+          // トークンリフレッシュ時に request 側にも反映して以降の呼び出しに備える
+          cookiesToSet.forEach(({ name, value }) => request.cookies.set(name, value))
           cookiesToSet.forEach(({ name, value, options }) =>
             response.cookies.set(name, value, options),
           )
@@ -65,17 +61,17 @@ export async function middleware(request: NextRequest) {
   if (!user && isProtectedRoute) {
     const loginUrl = new URL("/login", request.url)
     loginUrl.searchParams.set("next", request.nextUrl.pathname)
-    return withSecurityHeaders(NextResponse.redirect(loginUrl))
+    return NextResponse.redirect(loginUrl)
   }
 
   // 認証済みユーザーが認証画面にアクセス → /wizard へ
   if (user && isAuthRoute) {
-    return withSecurityHeaders(NextResponse.redirect(new URL("/wizard", request.url)))
+    return NextResponse.redirect(new URL("/wizard", request.url))
   }
 
   // トークンリフレッシュで更新されたクッキーを response に書き戻し、
   // ブラウザに届ける。
-  return withSecurityHeaders(response)
+  return response
 }
 
 export const config = {

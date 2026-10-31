@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // テストカバレッジ出力は lint 対象外
+    "coverage/**",
   ]),
 ]);
 

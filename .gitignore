@@ -1,0 +1,89 @@
+# 個人ファイル・フォルダ（BCPプロジェクトに不要、バージョン管理から除外）
+#
+# NOTE: フォルダ名・ファイル名のパターンはすべてリポジトリルート直下に
+# アンカー（先頭に / を付与）すること。
+# WHY: アンカーしない場合、任意の深さの同名ディレクトリ・拡張子にマッチし、
+# プロジェクト内の src/lib/pdf/・src/lib/documents/ などが黙って無視される。
+# 実際にこの問題で src/components/pdf 以下が一度もコミットされない事故が発生した。
+
+# 画像ファイル（リポジトリルート直下の個人ファイルのみ対象）
+/*.jpg
+/*.jpeg
+/*.png
+/*.PNG
+/*.gif
+/*.bmp
+/*.tiff
+/*.webp
+
+# ドキュメントファイル
+/*.doc
+/*.docx
+/*.xls
+/*.xlsx
+/*.pdf
+/*.ppt
+/*.pptx
+
+# 実行ファイル・スクリプト
+/*.exe
+/*.msi
+/*.bat
+/*.cmd
+/*.ini
+
+# 一時ファイル・ロックファイル
+*.tmp
+*.TMP
+~$*
+
+# 個人フォルダ（すべてリポジトリルート直下）
+/notedesk/
+/Desktop/
+/Documents/
+/Downloads/
+/Music/
+/Pictures/
+/Videos/
+/Screenshots/
+/Camera Roll/
+/Local/
+/thunder/
+/tmp/
+/wav/
+/xlsx/
+/pdf/
+/sda/
+/ssssda/
+/sssssss/
+/aaaaaa/
+/auto/
+/autonovels/
+/backup/
+/dasdas/
+/denkai/
+/google/
+/hhh/
+/keide/
+/mail_files/
+/manual/
+/narou/
+/narou2/
+/narou3/
+/narou4/
+/Rakukun/
+/QR_871165.png
+/1000002432.jpg
+/6911.jpg
+
+# ログ
+.dev-err.log
+.dev-out.log
+
+# パッケージストア（個人環境）
+.pnpm-store/
+
+# システムフォルダ
+/$RECYCLE.BIN/
+/System Volume Information/
+/WindowsApps/

@@ -69,7 +69,11 @@ export async function POST(req: Request) {
 
     const stripe = getStripe()
 
-    const origin = req.headers.get("origin") ?? "http://localhost:3000"
+    // 成功・キャンセル URL は NEXT_PUBLIC_APP_URL を優先する。
+    // WHY: Origin ヘッダはリクエストによって付与されない場合があり、その場合の
+    // フォールバックを localhost にすると本番で決済後のリダイレクトが壊れる。
+    const origin =
+      process.env.NEXT_PUBLIC_APP_URL ?? requestOrigin ?? "http://localhost:3000"
 
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
