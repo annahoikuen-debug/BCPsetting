@@ -4,11 +4,15 @@ import { ShieldCheck, LogOut } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { createClient } from "@/lib/supabase/server"
 import { signout } from "@/app/actions/auth"
+import { MobileMenu } from "@/components/landing/mobile-menu"
+import { LanguageSwitcher } from "@/components/landing/language-switcher"
 
 const navItems = [
   { label: "機能", href: "/#features" },
-  { label: "料金", href: "#" }, // TODO: 料金ページ作成後に差し替え
-  { label: "FAQ", href: "#" }, // TODO: FAQページ作成後に差し替え
+  { label: "料金", href: "/#pricing" },
+  { label: "FAQ", href: "/#faq" },
+  { label: "マニュアル", href: "/docs/manual" },
+  { label: "Q&A", href: "/docs/qa" },
 ]
 
 export default async function Header() {
@@ -41,7 +45,9 @@ export default async function Header() {
             </Link>
           ))}
         </nav>
-        <div className="flex items-center gap-3">
+        <LanguageSwitcher className="hidden md:flex" />
+        <MobileMenu user={user} />
+        <div className="flex items-center gap-3 md:ml-4">
           {user ? (
             <>
               <Button size="sm" asChild>
