@@ -73,7 +73,7 @@ function WizardPageInner() {
   })
   const [submitting, setSubmitting] = useState(false)
   const [autosaveStatus, setAutosaveStatus] = useState<AutosaveStatus>("idle")
-  const [companyId, setCompanyId] = useState<string | null>(null)
+  // companyId は ref で管理（下記 companyIdRef 参照）
   const [autosaveError, setAutosaveError] = useState<string | null>(null)
   const [draftsReady, setDraftsReady] = useState(false)
 
@@ -82,6 +82,10 @@ function WizardPageInner() {
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const hydratedRef = useRef(false)
+  // WHY: debouncedAutosave は useCallback([], ...) で初回クロージャを固定するため、
+  // state の companyId を直接参照すると常に初回値（null）を見てしまう。
+  // 自動保存が永続的に no-op になるバグを避けるため、最新値を ref でミラーする。
+  const companyIdRef = useRef<string | null>(null)
 
   const draft1 = useLocalStorageDraft("fastbcp:wizard:step1", EMPTY_STEP1)
   const draft2 = useLocalStorageDraft("fastbcp:wizard:step2", EMPTY_STEP2)
@@ -99,7 +103,7 @@ function WizardPageInner() {
       try {
         const { companyId: cid } = await ensureProfile()
         if (cancelled || !cid) return
-        setCompanyId(cid)
+        companyIdRef.current = cid
 
         if (hydratedRef.current) return
         hydratedRef.current = true
@@ -164,7 +168,7 @@ function WizardPageInner() {
       5: draft5.value,
       6: draft6.value,
     }[currentStep]
-    if (currentData && companyId) {
+    if (currentData && companyIdRef.current) {
       debouncedAutosave(currentStep, currentData)
     }
     setCurrentStep((prev) => (prev > 1 ? prev - 1 : prev))
@@ -180,7 +184,8 @@ function WizardPageInner() {
   }
 
   const performAutosave = async (step: number, data: any) => {
-    if (!companyId) return
+    const cid = companyIdRef.current
+    if (!cid) return
 
     setAutosaveStatus("saving")
     setAutosaveError(null)
@@ -201,7 +206,7 @@ function WizardPageInner() {
         ...(step === 6 ? { step6: data } : {}),
       }
 
-      const result = await upsertBcpDraft(allData as any, companyId)
+      const result = await upsertBcpDraft(allData as any, cid)
 
       if (result.error) {
         setAutosaveStatus("error")
@@ -246,8 +251,9 @@ function WizardPageInner() {
   }
 
   const handleSubmitAll = async () => {
+    const cid = companyIdRef.current
     setSubmitting(true)
-    if (!companyId) {
+    if (!cid) {
       setSubmitting(false)
       return
     }
@@ -259,7 +265,7 @@ function WizardPageInner() {
       step5: draft5.value,
       step6: draft6.value,
     }
-    const result = await upsertBcpDraft(allData as any, companyId)
+    const result = await upsertBcpDraft(allData as any, cid)
     if (result.error) {
       setAutosaveStatus("error")
       setAutosaveError(result.error)
