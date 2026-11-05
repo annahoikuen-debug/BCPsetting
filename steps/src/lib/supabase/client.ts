@@ -5,9 +5,9 @@ import { createBrowserClient } from "@supabase/ssr"
  * 呼び出しのたびに新規生成するのではなく、コンポーネント側で 1 度だけ呼び出して使い回すこと。
  *
  * WHY: NEXT_PUBLIC_* はビルド時の静的置換（process.env.NEXT_PUBLIC_X の直書きのみ）で
- * クライアントバンドルへインライン化される。process.env[name] の動的アクセスは
- * 置換対象外のため、ブラウザで常に undefined になりクライアント機能が全滅する。
- * ここでは必ず静的なプロパティアクセスで受け渡すこと。
+ * クライアントバンドルへインライン化される。動的な添字アクセス（env 変数名を
+ * ブラケットで渡す形式）は置換対象外のため、ブラウザで常に undefined になり
+ * クライアント機能が全滅する。ここでは必ず静的なプロパティアクセスで受け渡すこと。
  */
 export function createClient() {
   return createBrowserClient(
